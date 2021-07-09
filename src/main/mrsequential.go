@@ -72,6 +72,7 @@ func main() {
 			j++
 		}
 		values := []string{}
+		//shuffer
 		for k := i; k < j; k++ {
 			values = append(values, intermediate[k].Value)
 		}
