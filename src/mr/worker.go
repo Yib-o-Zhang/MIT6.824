@@ -6,6 +6,7 @@ import (
 	"io/ioutil"
 	"os"
 	"sort"
+	"time"
 )
 import "log"
 import "net/rpc"
@@ -59,6 +60,9 @@ func Worker(mapf func(string, string) []KeyValue,
 			doReduce(reply.TaskNum, reply.NMapTasks, reducef)
 		case Done:
 			os.Exit(0)
+		case Wait:
+			time.Sleep(1 * time.Second)
+			continue
 		default:
 			panic("bad task type")
 		}

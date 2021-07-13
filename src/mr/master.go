@@ -2,18 +2,17 @@ package mr
 
 import (
 	"log"
+	"net"
+	"net/http"
+	"net/rpc"
+	"os"
 	"sync"
 	"time"
 )
-import "net"
-import "os"
-import "net/rpc"
-import "net/http"
 
 type Master struct {
 	// Your definitions here.
 	mu                  sync.Mutex
-	cond                *sync.Cond
 	mapFiles            []string
 	nMapTasks           int
 	nReduceTasks        int
@@ -21,8 +20,12 @@ type Master struct {
 	mapTasksIssued      []time.Time
 	reduceTasksFinished []bool
 	reduceTasksIssued   []time.Time
-
-	isDone bool
+	inGet               chan GetTaskArgs
+	outGet              chan GetTaskReply
+	inFin               chan FinishTaskArgs
+	outFin              chan FinishTaskReply
+	isDone              bool
+	exist               chan bool
 }
 
 // Your code here -- RPC handlers for the worker to call.
@@ -39,80 +42,103 @@ func (m *Master) Example(args *ExampleArgs, reply *ExampleReply) error {
 
 // handle getTask rpc
 func (m *Master) HandleGetTask(args GetTaskArgs, reply *GetTaskReply) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	reply.NMapTasks = m.nMapTasks
-	reply.NReduceTasks = m.nReduceTasks
-	for {
-		AllMapDone := true
-		for i, thisMapDone := range m.mapTasksFinished {
-			if !thisMapDone {
-				if m.mapTasksIssued[i].IsZero() || m.mapTasksIssued[i].Second() > 10 {
-					reply.TaskType = Map
-					reply.TaskNum = i
-					reply.MapFile = m.mapFiles[i]
-					m.mapTasksIssued[i] = time.Now()
-					return nil
-				} else {
-					AllMapDone = false
-				}
-			}
-		}
-		if !AllMapDone {
-			m.cond.Wait()
-		} else {
-			break
-		}
-	}
-
-	for {
-		AllReduceDone := true
-		for i, thisReduceDone := range m.reduceTasksFinished {
-			if !thisReduceDone {
-				if m.reduceTasksIssued[i].IsZero() || m.reduceTasksIssued[i].Second() > 10 {
-					reply.TaskType = Reduce
-					reply.TaskNum = i
-					m.reduceTasksIssued[i] = time.Now()
-					return nil
-				} else {
-					AllReduceDone = false
-				}
-			}
-		}
-		if !AllReduceDone {
-			m.cond.Wait()
-		} else {
-			break
-		}
-	}
-
-	reply.TaskType = Done
-	m.isDone = true
-
+	m.inGet <- args
+	thisReply := <-m.outGet
+	reply.NMapTasks = thisReply.NMapTasks
+	reply.NReduceTasks = thisReply.NReduceTasks
+	reply.TaskNum = thisReply.TaskNum
+	reply.TaskType = thisReply.TaskType
+	reply.MapFile = thisReply.MapFile
 	return nil
 }
 
 func (m *Master) HandleFinishedTask(args FinishTaskArgs, reply *FinishTaskReply) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	switch args.TaskType {
-	case Map:
-		m.mapTasksFinished[args.TaskNum] = true
-	case Reduce:
-		m.reduceTasksFinished[args.TaskNum] = true
-	default:
-		log.Fatalf("bad finished task %d", args.TaskType)
-
-	}
-	m.cond.Broadcast()
+	m.inFin <- args
+	<-m.outFin
+	reply = new(FinishTaskReply)
 	return nil
+}
 
+func (m *Master) loop() {
+
+	go func() {
+		for {
+			select {
+			case <-m.inGet:
+				AllMapDone := true
+				reply := GetTaskReply{}
+				reply.NMapTasks = m.nMapTasks
+				reply.NReduceTasks = m.nReduceTasks
+				replyHandled := false
+				for i, thisMapDone := range m.mapTasksFinished {
+					if !thisMapDone {
+						AllMapDone = false
+						if m.mapTasksIssued[i].IsZero() || m.mapTasksIssued[i].Second() > 10 {
+							reply.TaskType = Map
+							reply.TaskNum = i
+							reply.MapFile = m.mapFiles[i]
+							m.mapTasksIssued[i] = time.Now()
+							m.outGet <- reply
+							replyHandled = true
+							break
+						}
+					}
+				}
+				log.Println("map replyhandled:", replyHandled)
+				if !replyHandled && !AllMapDone {
+					m.outGet <- GetTaskReply{}
+					continue
+				}
+				if AllMapDone {
+					AllReduceDone := true
+					replyHandled := false
+
+					for i, thisReduceDone := range m.reduceTasksFinished {
+						if !thisReduceDone {
+							AllReduceDone = false
+							if m.reduceTasksIssued[i].IsZero() || m.reduceTasksIssued[i].Second() > 10 {
+								reply.TaskType = Reduce
+								reply.TaskNum = i
+								m.reduceTasksIssued[i] = time.Now()
+								m.outGet <- reply
+								replyHandled = true
+								break
+							}
+						}
+					}
+					if !replyHandled && !AllReduceDone {
+						m.outGet <- GetTaskReply{}
+						continue
+					}
+
+					if AllReduceDone {
+						reply.TaskType = Done
+						m.isDone = true
+						m.outGet <- reply
+					}
+				}
+			case finArg := <-m.inFin:
+				reply := FinishTaskReply{}
+				switch finArg.TaskType {
+				case Map:
+					m.mapTasksFinished[finArg.TaskNum] = true
+					m.outFin <- reply
+				case Reduce:
+					m.reduceTasksFinished[finArg.TaskNum] = true
+					m.outFin <- reply
+				default:
+					log.Fatalf("bad finished task %d", finArg.TaskType)
+
+				}
+			}
+		}
+	}()
 }
 
 //
 // start a thread that listens for RPCs from worker.go
 //
+
 func (m *Master) server() {
 	rpc.Register(m)
 	rpc.HandleHTTP()
@@ -124,6 +150,7 @@ func (m *Master) server() {
 		log.Fatal("listen error:", e)
 	}
 	go http.Serve(l, nil)
+	m.loop()
 }
 
 //
@@ -136,6 +163,7 @@ func (m *Master) Done() bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	ret = m.isDone
+
 	return ret
 }
 
@@ -146,7 +174,6 @@ func (m *Master) Done() bool {
 //
 func MakeMaster(files []string, nReduce int) *Master {
 	m := Master{}
-	m.cond = sync.NewCond(&m.mu)
 	m.mapFiles = files
 	m.nMapTasks = len(files)
 	m.nReduceTasks = nReduce
@@ -154,15 +181,12 @@ func MakeMaster(files []string, nReduce int) *Master {
 	m.reduceTasksFinished = make([]bool, nReduce)
 	m.mapTasksIssued = make([]time.Time, len(files))
 	m.mapTasksFinished = make([]bool, len(files))
+	m.exist = make(chan bool)
+	m.inGet = make(chan GetTaskArgs)
+	m.outGet = make(chan GetTaskReply)
+	m.inFin = make(chan FinishTaskArgs)
+	m.outFin = make(chan FinishTaskReply)
 
-	go func() {
-		for {
-			m.mu.Lock()
-			m.cond.Broadcast()
-			m.mu.Unlock()
-			time.Sleep(time.Second)
-		}
-	}()
 	m.server()
 	return &m
 }

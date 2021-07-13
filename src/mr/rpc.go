@@ -27,6 +27,7 @@ type TaskType int
 
 // go enum substitution
 const (
+	Wait   TaskType = 0
 	Map    TaskType = 1
 	Reduce TaskType = 2
 	Done   TaskType = 3 //only if every Map&&Reduce tasks done ,signal for job exit
