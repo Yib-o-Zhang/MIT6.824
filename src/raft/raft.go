@@ -197,9 +197,13 @@ func (rf *Raft) AppendEntriesRpc(args *AppendEntriesArgs, reply *AppendEntriesRe
 		reply.Success = false
 		return
 	}
-	log, ok := rf.getLog(args.PrevLogIndex)
+	if args.Term > rf.currentTerm {
+		rf.currentTerm = args.Term
+		rf.voteFor = -1
+	}
+	prevLog, ok := rf.getLog(args.PrevLogIndex)
 
-	if !ok || log.Term != args.PrevLogTerm {
+	if !ok || prevLog.Term != args.PrevLogTerm {
 		reply.Success = false
 		return
 	}
